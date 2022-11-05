@@ -1,0 +1,1008 @@
+//***************************************************************************************************************************************
+/* Código realizado por Gerardo Paz Fuentes y Javier Alejandro Pérez Marín
+ * Adaptación, migración y creación de nuevas funciones: Pablo Mazariegos y José Morales
+ * Con ayuda de: José Guerra
+ * IE3027: Electrónica Digital 2 - 2022
+ */
+//***************************************************************************************************************************************
+#include <SPI.h>
+#include <SD.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include "TM4C123GH6PM.h"
+#include "inc/hw_ints.h"
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "driverlib/debug.h"
+#include "driverlib/gpio.h"
+#include "driverlib/interrupt.h"
+#include "driverlib/rom_map.h"
+#include "driverlib/rom.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/timer.h"
+
+#include "bitmaps.h"
+#include "font.h"
+#include "lcd_registers.h"
+
+#define LCD_RST PD_0
+#define LCD_CS PD_1
+#define LCD_RS PD_2
+#define LCD_WR PD_3
+#define LCD_RD PE_1
+#define BT1 PF_4
+#define BT2 PF_0
+
+/*
+** On SPI module 0:
+** MOSI - PA_5
+** MISO - PA_4
+** CLK - PA_2
+** CS - PA_3
+*/
+
+/*
+** Control 1:
+** RX -> PC_4 -> Serial 1
+** Control 2:
+** RX -> PC_6 -> Serial 3
+*/
+
+
+#define w_screen 320 //Ancho pantalla
+#define h_screen 240 //Alto pantalla
+#define w_linescreen 4 //Ancho línea divisora pantalla
+
+#define w_nube 106 //Ancho nubes
+#define h_nube 42 //Alto nubes
+
+#define w_piso 100 //Ancho piso
+#define h_piso 19 //Alto piso
+
+#define w_cactus 14 //Ancho cactus
+#define h_cactus 26 //Alto cactus
+
+#define w_dino 18 //Ancho dino
+#define h_dino 26 //Alto dino
+#define xi_dino 30 //X inicial del dino
+#define yi_dino (240-(h_piso)-(h_dino)) //Y inicial dino
+
+#define w_winner 44
+#define h_winner 49
+
+#define w_loser 33
+#define h_loser 49
+
+// Físicas - Posiciones iniciales
+#define yf (h_screen-h_piso-h_cactus-h_dino-9)
+#define yo (h_screen-h_dino-h_piso)
+
+//Variables de tiempos y puntajes
+unsigned long tiempo_dino, tiempo_dino2, tiempo_cactus, tiempo_salto, tiempo_salto2, tiempo_salto_temp, tiempo_inicio, tiempo_menu;
+int pts=0;
+char puntaje[10];
+boolean final_flag = false;
+
+int DPINS[] = {PB_0, PB_1, PB_2, PB_3, PB_4, PB_5, PB_6, PB_7};  //Pines pantalla
+int est1 = 0, est2 = 0, dir = 0, menu = 1; //Variables de control
+File Archivo; //Variable para lectura en SD
+//***************************************************************************************************************************************
+// Functions Prototypes
+//***************************************************************************************************************************************
+void LCD_Init(void);
+void LCD_CMD(uint8_t cmd);
+void LCD_DATA(uint8_t data);
+void SetWindows(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2);
+void LCD_Clear(unsigned int c);
+void H_line(unsigned int x, unsigned int y, unsigned int l, unsigned int c);
+void V_line(unsigned int x, unsigned int y, unsigned int l, unsigned int c);
+void Rect(unsigned int x, unsigned int y, unsigned int w, unsigned int h, unsigned int c);
+void FillRect(unsigned int x, unsigned int y, unsigned int w, unsigned int h, unsigned int c);
+void LCD_Print(String text, int x, int y, int fontSize, int color, int background);
+void LCD_Bitmap(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char bitmap[]);
+
+void LCD_BitmapSD(int x, int y, int width, int height, String TXT);
+
+void LCD_Sprite(int x, int y, int width, int height, unsigned char bitmap[],int columns, int index, char flip, char offset);
+
+void salto(void);
+void salto2(void);
+int LECTURA1, LECTURA2;
+
+//***************************************************************************************************************************************
+// Inicialización
+//***************************************************************************************************************************************
+void setup() {
+  // Frecuencia de reloj (utiliza TivaWare)
+  SysCtlClockSet(SYSCTL_SYSDIV_2_5|SYSCTL_USE_PLL|SYSCTL_OSC_MAIN|SYSCTL_XTAL_16MHZ);
+  Serial.begin(9600);
+  Serial2.begin(9600);
+  Serial7.begin(9600);
+  
+  // Configuración del puerto (utiliza TivaWare)
+  GPIOPadConfigSet(GPIO_PORTB_BASE, 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7, GPIO_STRENGTH_8MA, GPIO_PIN_TYPE_STD_WPU);
+  Serial.println("Inicio");
+  
+  // Referencia para colores RGB565: http://www.rinkydinkelectronics.com/calc_rgb565.php
+  // Inicialización de la pantalla
+  LCD_Init();
+  LCD_Clear(0xE73C);
+  
+  pinMode(PA_3, OUTPUT);
+  SPI.setModule(0);
+  
+  while (!SD.begin(PA_3)) {
+    Serial.println("No hay SD amigo");
+    LCD_Print("ERROR, NO SD", 65, 120, 2, 0xF800, 0xE73C);
+  }
+  Serial.println("Inicia el Juego");
+  LCD_Clear(0xE73C);  //Limpieza de pantalla con color de menú de inicio
+  // void LCD_Print(String text, int x, int y, int fontSize, int color, int background);
+  // fontSize puede ser 1 ó 2. En "font.h" pueden ver los detalles
+  
+//  pinMode(PF_0, INPUT_PULLUP);
+//  pinMode(PF_4, INPUT_PULLUP);
+//  attachInterrupt(digitalPinToInterrupt(PF_0), salto, FALLING);
+//  attachInterrupt(digitalPinToInterrupt(PF_4), salto2, FALLING);
+
+
+  LCD_BitmapSD(w_screen/2-40,90,60,38,"Menu.txt"); //Se lee de la SD e imprime imagen de menú
+  LCD_Print("Javier & Gerardo", 30, 200, 2, 0xffff, 0xE73C); //Se imprimen créditos del juego
+
+  while(menu){ //Loop de menú
+    
+    // void LCD_Print(String text, int x, int y, int fontSize, int color, int background);
+    // fontSize puede ser 1 ó 2. En "font.h" pueden ver los detalles
+    
+  if(Serial7.available()){
+    LECTURA1 = Serial7.read();
+    Serial.println(LECTURA1);
+    if(LECTURA1 == 1)
+      menu = 0;
+  }
+  if(Serial2.available()){
+    LECTURA2 = Serial2.read();
+    Serial.println(LECTURA2);
+    if(LECTURA2 == 1)
+      menu = 0;
+  }
+
+    //Se imprime texto del menú intermitente
+    LCD_Print("Dino Runner", 78, 50-16, 2, 0xffff, 0xE73C);
+    LCD_Print("Press Start", 65, 160, 2, 0xffff, 0xE73C);
+    delay(125);
+    LCD_Print("Dino Runner", 78, 50-16, 2, 0x4a69, 0xE73C);
+    LCD_Print("Press Start", 65, 160, 2, 0x4a69, 0xE73C);
+    delay(125);
+  }
+  
+  LCD_Clear(0x4659); //Limpieza de pantalla con color de juego principal
+
+  // void LCD_Print(String text, int x, int y, int fontSize, int color, int background);
+  // fontSize puede ser 1 ó 2. En "font.h" pueden ver los detalles
+    
+  //LCD_Bitmap(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char bitmap[]);
+  //Impresión de fondo del juego
+  LCD_BitmapSD(0,240-(h_piso),w_piso,h_piso,"piso.txt");
+  LCD_BitmapSD(100,240-(h_piso),w_piso,h_piso,"piso.txt");
+  LCD_BitmapSD(200,240-(h_piso),w_piso,h_piso,"piso.txt");
+  LCD_BitmapSD(220,240-(h_piso),w_piso,h_piso,"piso.txt");
+  LCD_BitmapSD(30,110,w_nube,h_nube,"nube.txt");
+  LCD_BitmapSD(160,90,w_nube,h_nube,"nube.txt");
+  FillRect(w_screen/2-(w_linescreen/2), 180, w_linescreen, h_screen, 0x4a69);
+
+  //Se imprime info del juego
+  LCD_Print("Dino Runner", 75, 50-16, 2, 0xffff, 0x4659);
+  LCD_Print("Co-op", 120, 50, 2, 0xffff, 0x4659);
+  LCD_Print("Javier & Gerardo", 100, 75, 1, 0xffff, 0x4659);
+
+  //Tiempos para animaciones
+  tiempo_dino = millis();
+  tiempo_cactus = millis();
+  tiempo_inicio = millis();
+
+  //Variables de puntajes
+  pts = 0;
+  sprintf(puntaje,"%d%d",pts/10, pts%10);
+  LCD_Print(puntaje,w_screen/2-15,130,2,0x4a69,0x4659);
+}
+//***************************************************************************************************************************************
+// Loop Infinito
+//***************************************************************************************************************************************
+
+
+//Variables para animaciones del Dino
+int index_dino = 1, index_dino2 = 1, y_test, y_test2;
+float x_dino = (float)(xi_dino);
+float y_dino = (float)(yi_dino);
+float y_dino_real, y_dino_real2;
+
+/*
+  Posiciones de los cactus
+  0: Cactus 1
+  1: Cactus 2
+  2: Cactus 3 J2
+  3: Cactus 4 J2
+*/
+int obstaculos_x[4];
+int obstaculos_y[4];
+
+// Variables de control y posición de cactus
+int x1, x2, x3, x4;
+long pos_rand;
+bool cactus2_spawn = false, cactus1_spawn = true;
+
+//Variables de control y dirección de salto
+bool jump_flag = false, direction_flag = false;
+bool jump_flag2 = false, direction_flag2 = false;
+float y = 0, y2 = 0;
+
+//Variables de control de colisiones
+float colision_cactus[4]; // Posición del cactus 0: x_dino1, 1: y_dino1 | 2: x_dino2, 3: y_dino2 
+bool colision_cactus_flag = false, colision_cactus_flag2 = false;
+bool clear_final = false;
+
+unsigned long tiempo_partida;
+
+int x_loser = 0, x_winner = 0;
+
+
+void loop() {
+
+  while(!colision_cactus_flag && !colision_cactus_flag2){
+    if(Serial2.available()){
+      if(Serial2.read() == 1){
+        Serial.println("Hola2");
+        salto2();
+      }
+    }
+  
+    if(Serial7.available()){
+      if(Serial7.read() == 1){
+        Serial.println("Hola7");
+        salto();
+      }
+    }
+    if(cactus2_spawn){
+      //pos_rand = random(w_screen+w_cactus, 400-w_cactus);
+      x2 = w_screen/2-(w_linescreen)-w_cactus;
+      cactus2_spawn = false;
+    }
+  
+    if(cactus1_spawn){
+      //pos_rand = random(w_screen+w_cactus, 400-w_cactus);
+      x1 = w_screen/2-(w_linescreen)-w_cactus;
+      cactus1_spawn = false;
+    }
+  
+    //FillRect(colision_cactus[2], colision_cactus[3], 10, 10, 0x0000);
+    //FillRect(x3, obstaculos_y[2], 10, 10, 0xffff);
+  
+    // COLISIONES VERIFICADOR DINO 1
+    // CACTUS1
+    if(colision_cactus[0] >= obstaculos_x[0] && colision_cactus[0]-w_dino <= obstaculos_x[0]+w_cactus-5){
+      if(colision_cactus[1] < 240-(h_piso)-(h_cactus)-0.5){
+        colision_cactus_flag = false;
+      }
+      else{
+       colision_cactus_flag = true;
+       final_flag = false;
+       clear_final = false;
+      }
+    }
+    // CACTUS 2
+    if(colision_cactus[0] >= obstaculos_x[1] && colision_cactus[0]-w_dino <= obstaculos_x[1]+w_cactus-5){
+      if(colision_cactus[1] < 240-(h_piso)-(h_cactus)-0.5){
+        colision_cactus_flag = false;
+      }
+      else{
+       colision_cactus_flag = true;
+       final_flag = false;
+       clear_final = false;
+      }
+    }
+  
+    // COLISIONES VERIFICADOR DINO 2
+    // CACTUS 3
+   if(colision_cactus[2] <= obstaculos_x[2] && colision_cactus[2]+w_dino >= obstaculos_x[2]-w_cactus+5){
+      if(colision_cactus[3] < 240-(h_piso)-(h_cactus)-0.5){
+        colision_cactus_flag2 = false;
+      }
+      else{
+       colision_cactus_flag2 = true;
+       final_flag = false;
+       clear_final = false;
+      }
+    }
+    // CACTUS 4
+    if(colision_cactus[2] <= obstaculos_x[3] && colision_cactus[2]+w_dino >= obstaculos_x[3]-w_cactus+5){
+      if(colision_cactus[3] < 240-(h_piso)-(h_cactus)-0.5){
+        colision_cactus_flag2 = false;
+      }
+      else{
+       colision_cactus_flag2 = true;
+       final_flag = false;
+       clear_final = false;
+      }
+    }
+  
+  /* --------- PUNTOS -----------*/
+    if(x1 == x_dino-w_cactus-5 || x2 == x_dino-w_cactus-5){
+      pts++;
+      sprintf(puntaje,"%d%d",pts/10, pts%10);
+      LCD_Print(puntaje,w_screen/2-15,130,2,0x4a69,0x4659);
+    }
+  
+  
+  /* ----------------------------*/
+  
+  /* ------------ DIBUJO OBSTÁCULOS ------------- */
+    if(millis() >= tiempo_cactus+2){  // Animación
+      tiempo_cactus = millis();
+      if(!colision_cactus_flag && !colision_cactus_flag2){
+        // CACTUS 1
+        if(x1>0){
+          x1-=0.5;
+          x3 = w_screen-x1-w_cactus;
+        }
+        if(x2>0){
+          x2-=0.5;
+          x4 = w_screen-x2-w_cactus;
+        }
+        if(x1 == 20){
+          cactus2_spawn = true; 
+        }
+        if(x1==0){
+          FillRect(0,obstaculos_y[0],w_cactus, h_cactus, 0x4659);
+        }
+        if(x3 == w_screen-w_cactus){
+          FillRect(obstaculos_x[2]-w_cactus,obstaculos_y[2],w_cactus, h_cactus, 0x4659);
+        }
+        if(x2 == 10){
+          cactus1_spawn = true;
+        }
+        if(x2==0){
+          FillRect(0,obstaculos_y[1],w_cactus, h_cactus, 0x4659);
+          //FillRect(obstaculos_x[3],obstaculos_y[3],w_cactus, h_cactus, 0x4659);
+        }
+        if(x4 == w_screen-w_cactus){
+          FillRect(obstaculos_x[3]-w_cactus,obstaculos_y[3],w_cactus, h_cactus, 0x4659);
+        }
+      }
+    }
+  
+    // CACTUS 1 y 3
+    obstaculos_x[0] = x1;
+    obstaculos_y[0] = h_screen-(h_piso)-(h_cactus);
+    obstaculos_x[2] = x3+w_cactus;
+    obstaculos_y[2] = h_screen-(h_piso)-(h_cactus);
+  
+    if(x1!= 0){
+      LCD_Bitmap(obstaculos_x[0],obstaculos_y[0],w_cactus,h_cactus,cactus);
+      LCD_Bitmap(obstaculos_x[2]-w_cactus,obstaculos_y[2],w_cactus,h_cactus,cactus);
+    }
+    V_line(obstaculos_x[0]+(w_cactus), obstaculos_y[0], h_cactus, 0x4659);
+    V_line(obstaculos_x[2]-w_cactus, obstaculos_y[2], h_cactus, 0x4659);
+  
+    // CACTUS 2 y 4
+    obstaculos_x[1] = x2;
+    obstaculos_y[1] = h_screen-(h_piso)-(h_cactus);
+    obstaculos_x[3] = x4+w_cactus;
+    obstaculos_y[3] = h_screen-(h_piso)-(h_cactus);
+  
+    if(x2!= 0){
+      LCD_Bitmap(obstaculos_x[1],obstaculos_y[1],w_cactus,h_cactus,cactus);
+      LCD_Bitmap(obstaculos_x[3]-w_cactus,obstaculos_y[3],w_cactus,h_cactus,cactus);
+    }
+    V_line(obstaculos_x[1]+(w_cactus), obstaculos_y[1], h_cactus, 0x4659);
+    V_line(obstaculos_x[3]-w_cactus, obstaculos_y[2], h_cactus, 0x4659);
+  
+  /* ---------------------------- */
+  
+  /* ----------- SALTO DINO 1 ----------------- */
+    if(jump_flag){
+      if(millis() >= tiempo_salto+4){
+        tiempo_salto = millis();
+        if(!direction_flag){  // SUBIDA
+          y+=1.5;
+          if(y == 60){
+            direction_flag = true;
+          }
+        }
+        else{ // BAJADA
+          y-=1.5;
+          if(y == 0){
+            direction_flag = false;
+            jump_flag = false;
+          }
+        }
+      }
+    }
+  /* ---------------------------- */
+  
+  /* ----------- SALTO DINO 2 ----------------- */
+    if(jump_flag2){
+      if(millis() >= tiempo_salto2+4){
+        tiempo_salto2 = millis();
+        if(!direction_flag2){  // SUBIDA
+          y2+=1.5;
+          if(y2 == 60){
+            direction_flag2 = true;
+          }
+        }
+        else{ // BAJADA
+          y2-=1.5;
+          if(y2 == 0){
+            direction_flag2 = false;
+            jump_flag2 = false;
+          }
+        }
+      }
+    }
+  /* ---------------------------- */
+  
+  /* ----------- DIBUJO DINO 1 ----------------- */
+    if(millis() >= tiempo_dino+50){  // Animación
+      tiempo_dino = millis();
+      if(index_dino > 3){
+        index_dino = 1;
+      }
+      else{
+        index_dino++;
+      }
+    }
+  
+    y_dino_real = y_dino-y;
+    colision_cactus[0] = x_dino+w_dino;
+    colision_cactus[1] = y_dino_real+h_dino;
+    
+    LCD_Sprite(x_dino, y_dino_real, w_dino, h_dino, dino, 3, index_dino, 0, 0);
+    if(!direction_flag) // SUBIDA
+      FillRect(x_dino, y_dino_real+h_dino-1.5, w_dino, 2, 0x4659);
+      //H_line(x_dino, y_dino_real+h_dino-0.5, w_dino, 0x4659);
+    else{ // BAJADA
+      FillRect(x_dino, y_dino_real-1.5, w_dino, 2, 0x4659);
+      //H_line(x_dino, y_dino_real-1, w_dino, 0x4659);
+      H_line(x_dino, y_dino_real+h_dino-1, w_dino, 0x4659);
+    }
+  /* ---------------------------- */  
+  
+  /* ----------- DIBUJO DINO 2 ----------------- */
+  
+    y_dino_real2 = y_dino-y2;
+    colision_cactus[2] = w_screen-x_dino-w_dino;
+    colision_cactus[3] = y_dino_real2+h_dino;
+    
+    LCD_Sprite(w_screen-x_dino-w_dino, y_dino_real2, w_dino, h_dino, dino, 3, index_dino, 1, 0);
+    if(!direction_flag2) // SUBIDA
+      FillRect(w_screen-x_dino-w_dino, y_dino_real2+h_dino-1.5, w_dino, 2, 0x4659);
+      //H_line(w_screen-x_dino-w_dino, y_dino_real2+h_dino-0.5, w_dino, 0x4659);
+    else{ // BAJADA
+      FillRect(w_screen-x_dino-w_dino, y_dino_real2-1.5, w_dino, 2, 0x4659);
+      //H_line(w_screen-x_dino-w_dino, y_dino_real2-1, w_dino, 0x4659);
+      H_line(w_screen-x_dino-w_dino, y_dino_real2+h_dino-1, w_dino, 0x4659);
+    }
+
+    //FillRect(colision_cactus[0]-5, colision_cactus[1], 5, 5, 0xffff+x1);
+    //FillRect(colision_cactus[2],colision_cactus[3], 5, 5, 0x8f00+x1);
+    //FillRect(obstaculos_x[0],obstaculos_y[0], 5, 5, 0x0000+x1);
+    //FillRect(obstaculos_x[2],obstaculos_y[2], 5, 5, 0x8f00+x1);
+    //FillRect(obstaculos_x[1],obstaculos_y[1], 5, 5, 0xffff+x1);
+    //FillRect(obstaculos_x[3],obstaculos_y[3], 5, 5, 0x8ff0+x1);
+      
+  /* ---------------------------- */ 
+  
+  } // END GLOBAL WHILE 
+  
+  // Pantalla Ganador/Perdedor
+  while(!final_flag){
+    LCD_Print("GAME OVER", 85, 100, 2, 0xF800, 0x4659);
+    LCD_Print("Press any button", 95, 120, 1, 0xF800, 0x4659);
+    delay(125);
+    LCD_Print("GAME OVER", 85, 100, 2, 0xffff, 0x4659);
+    LCD_Print("Press any button", 95, 120, 1, 0xffff, 0x4659);
+    delay(125); 
+    if(Serial2.available()){
+      if(Serial2.read() == 1){
+        Serial.println("Hola2");
+        salto();
+      }
+    }
+  
+    if(Serial7.available()){
+      if(Serial7.read() == 1){
+        Serial.println("Hola7");
+        salto2();
+      }
+    }
+  }
+
+  if(clear_final){
+    clear_final = false;
+    LCD_Clear(0x4659);
+    LCD_Print("GAME OVER", 85, 20, 2, 0xF800, 0x4659);
+    LCD_Print(puntaje, w_screen/2-15, 70, 2, 0x4a69, 0x4659);
+    LCD_Print("Press RESET for new game", 65, 40, 1, 0xF800, 0x4659);
+  }
+
+  if(millis() >= tiempo_dino+100){  // Animación
+      tiempo_dino = millis();
+      if(index_dino > 3){
+        index_dino = 1;
+      }
+      else{
+        index_dino++;
+      }
+    }
+
+
+  if(colision_cactus_flag && colision_cactus_flag2){
+    Rect(w_screen/2-50, h_screen/2-12, 100, 40, 0x4a69);
+    LCD_Print("TIE", w_screen/2-23, h_screen/2, 2, 0x4a69, 0x4659);
+  }
+  else{
+    if(colision_cactus_flag){
+      LCD_Print("LOSER", 40, 100, 2, 0x4a69, 0x4659);
+      x_loser = w_screen/4-w_loser/2;
+    }
+    else{
+      LCD_Print("WINNER", 40, 100, 2, 0xffff, 0x4659);
+      x_winner = w_screen/4-w_winner/2;
+    }
+  
+    if(colision_cactus_flag2){
+      LCD_Print("LOSER", 190, 100, 2, 0x4a69, 0x4659);
+      x_loser = w_screen-w_screen/4-w_loser/2;
+    }
+    else{
+      LCD_Print("WINNER", 190, 100, 2, 0xffff, 0x4659);
+      x_winner = w_screen-w_screen/4-w_winner/2;
+    }
+    LCD_Sprite(x_loser, 150, w_loser, h_loser, loser, 3, index_dino, 1, 0);
+    LCD_Sprite(x_winner, 150, w_winner, h_winner, winner, 3, index_dino, 1, 0);
+    FillRect(0, 150+h_winner-1, 320, 2, 0x0000);
+  }
+
+} // END LOOP
+
+
+
+void salto(void){
+  menu = 0;
+  final_flag = true;
+  clear_final = true;
+  if(y_dino_real >= yo){
+    jump_flag = true;
+    direction_flag = false;
+    y_dino_real = 0;
+    y_test = 0;
+    tiempo_salto = millis(); 
+  }
+}
+
+void salto2(void){
+  menu = 0;
+  final_flag = true;
+  clear_final = true;
+  if(y_dino_real2 >= yo){
+    jump_flag2 = true;
+    direction_flag2 = false;
+    y_dino_real2 = 0;
+    y_test2 = 0;
+    tiempo_salto2 = millis(); 
+  }
+}
+
+
+
+
+
+
+
+
+
+
+//***************************************************************************************************************************************
+// Función para inicializar LCD
+//***************************************************************************************************************************************
+void LCD_Init(void) {
+  pinMode(LCD_RST, OUTPUT);
+  pinMode(LCD_CS, OUTPUT);
+  pinMode(LCD_RS, OUTPUT);
+  pinMode(LCD_WR, OUTPUT);
+  pinMode(LCD_RD, OUTPUT);
+  for (uint8_t i = 0; i < 8; i++){
+    pinMode(DPINS[i], OUTPUT);
+  }
+  //****************************************
+  // Secuencia de Inicialización
+  //****************************************
+  digitalWrite(LCD_CS, HIGH);
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_WR, HIGH);
+  digitalWrite(LCD_RD, HIGH);
+  digitalWrite(LCD_RST, HIGH);
+  delay(5);
+  digitalWrite(LCD_RST, LOW);
+  delay(20);
+  digitalWrite(LCD_RST, HIGH);
+  delay(150);
+  digitalWrite(LCD_CS, LOW);
+  //****************************************
+  LCD_CMD(0xE9);  // SETPANELRELATED
+  LCD_DATA(0x20);
+  //****************************************
+  LCD_CMD(0x11); // Exit Sleep SLEEP OUT (SLPOUT)
+  delay(100);
+  //****************************************
+  LCD_CMD(0xD1);    // (SETVCOM)
+  LCD_DATA(0x00);
+  LCD_DATA(0x71);
+  LCD_DATA(0x19);
+  //****************************************
+  LCD_CMD(0xD0);   // (SETPOWER) 
+  LCD_DATA(0x07);
+  LCD_DATA(0x01);
+  LCD_DATA(0x08);
+  //****************************************
+  LCD_CMD(0x36);  // (MEMORYACCESS)
+  LCD_DATA(0x40|0x80|0x20|0x08); // LCD_DATA(0x19);
+  //****************************************
+  LCD_CMD(0x3A); // Set_pixel_format (PIXELFORMAT)
+  LCD_DATA(0x05); // color setings, 05h - 16bit pixel, 11h - 3bit pixel
+  //****************************************
+  LCD_CMD(0xC1);    // (POWERCONTROL2)
+  LCD_DATA(0x10);
+  LCD_DATA(0x10);
+  LCD_DATA(0x02);
+  LCD_DATA(0x02);
+  //****************************************
+  LCD_CMD(0xC0); // Set Default Gamma (POWERCONTROL1)
+  LCD_DATA(0x00);
+  LCD_DATA(0x35);
+  LCD_DATA(0x00);
+  LCD_DATA(0x00);
+  LCD_DATA(0x01);
+  LCD_DATA(0x02);
+  //****************************************
+  LCD_CMD(0xC5); // Set Frame Rate (VCOMCONTROL1)
+  LCD_DATA(0x04); // 72Hz
+  //****************************************
+  LCD_CMD(0xD2); // Power Settings  (SETPWRNORMAL)
+  LCD_DATA(0x01);
+  LCD_DATA(0x44);
+  //****************************************
+  LCD_CMD(0xC8); //Set Gamma  (GAMMASET)
+  LCD_DATA(0x04);
+  LCD_DATA(0x67);
+  LCD_DATA(0x35);
+  LCD_DATA(0x04);
+  LCD_DATA(0x08);
+  LCD_DATA(0x06);
+  LCD_DATA(0x24);
+  LCD_DATA(0x01);
+  LCD_DATA(0x37);
+  LCD_DATA(0x40);
+  LCD_DATA(0x03);
+  LCD_DATA(0x10);
+  LCD_DATA(0x08);
+  LCD_DATA(0x80);
+  LCD_DATA(0x00);
+  //****************************************
+  LCD_CMD(0x2A); // Set_column_address 320px (CASET)
+  LCD_DATA(0x00);
+  LCD_DATA(0x00);
+  LCD_DATA(0x01);
+  LCD_DATA(0x3F);
+  //****************************************
+  LCD_CMD(0x2B); // Set_page_address 480px (PASET)
+  LCD_DATA(0x00);
+  LCD_DATA(0x00);
+  LCD_DATA(0x01);
+  LCD_DATA(0xE0);
+//  LCD_DATA(0x8F);
+  LCD_CMD(0x29); //display on 
+  LCD_CMD(0x2C); //display on
+
+  LCD_CMD(ILI9341_INVOFF); //Invert Off
+  delay(120);
+  LCD_CMD(ILI9341_SLPOUT);    //Exit Sleep
+  delay(120);
+  LCD_CMD(ILI9341_DISPON);    //Display on
+  digitalWrite(LCD_CS, HIGH);
+}
+
+//***************************************************************************************************************************************
+// Función para enviar comandos a la LCD - parámetro (comando)
+//***************************************************************************************************************************************
+void LCD_CMD(uint8_t cmd) {
+  digitalWrite(LCD_RS, LOW);
+  digitalWrite(LCD_WR, LOW);
+  GPIO_PORTB_DATA_R = cmd;
+  digitalWrite(LCD_WR, HIGH);
+}
+
+//***************************************************************************************************************************************
+// Función para enviar datos a la LCD - parámetro (dato)
+//***************************************************************************************************************************************
+void LCD_DATA(uint8_t data) {
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_WR, LOW);
+  GPIO_PORTB_DATA_R = data;
+  digitalWrite(LCD_WR, HIGH);
+}
+
+//***************************************************************************************************************************************
+// Función para definir rango de direcciones de memoria con las cuales se trabajara (se define una ventana)
+//***************************************************************************************************************************************
+void SetWindows(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2) {
+  LCD_CMD(0x2a); // Set_column_address 4 parameters
+  LCD_DATA(x1 >> 8);
+  LCD_DATA(x1);   
+  LCD_DATA(x2 >> 8);
+  LCD_DATA(x2);   
+  LCD_CMD(0x2b); // Set_page_address 4 parameters
+  LCD_DATA(y1 >> 8);
+  LCD_DATA(y1);   
+  LCD_DATA(y2 >> 8);
+  LCD_DATA(y2);   
+  LCD_CMD(0x2c); // Write_memory_start
+}
+
+//***************************************************************************************************************************************
+// Función para borrar la pantalla - parámetros (color)
+//***************************************************************************************************************************************
+void LCD_Clear(unsigned int c){  
+  unsigned int x, y;
+  LCD_CMD(0x02c); // write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW);   
+  SetWindows(0, 0, 319, 239); // 479, 319);
+  for (x = 0; x < 320; x++)
+    for (y = 0; y < 240; y++) {
+      LCD_DATA(c >> 8); 
+      LCD_DATA(c); 
+    }
+  digitalWrite(LCD_CS, HIGH);
+} 
+
+//***************************************************************************************************************************************
+// Función para dibujar una línea horizontal - parámetros ( coordenada x, cordenada y, longitud, color)
+//*************************************************************************************************************************************** 
+void H_line(unsigned int x, unsigned int y, unsigned int l, unsigned int c) {  
+  unsigned int i, j;
+  LCD_CMD(0x02c); //write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW);
+  l = l + x;
+  SetWindows(x, y, l, y);
+  j = l;// * 2;
+  for (i = 0; i < l; i++) {
+      LCD_DATA(c >> 8); 
+      LCD_DATA(c); 
+  }
+  digitalWrite(LCD_CS, HIGH);
+}
+
+//***************************************************************************************************************************************
+// Función para dibujar una línea vertical - parámetros ( coordenada x, cordenada y, longitud, color)
+//*************************************************************************************************************************************** 
+void V_line(unsigned int x, unsigned int y, unsigned int l, unsigned int c) {  
+  unsigned int i,j;
+  LCD_CMD(0x02c); //write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW);
+  l = l + y;
+  SetWindows(x, y, x, l);
+  j = l; //* 2;
+  for (i = 1; i <= j; i++) {
+    LCD_DATA(c >> 8); 
+    LCD_DATA(c);
+  }
+  digitalWrite(LCD_CS, HIGH);  
+}
+
+//***************************************************************************************************************************************
+// Función para dibujar un rectángulo - parámetros ( coordenada x, cordenada y, ancho, alto, color)
+//***************************************************************************************************************************************
+void Rect(unsigned int x, unsigned int y, unsigned int w, unsigned int h, unsigned int c) {
+  H_line(x  , y  , w, c);
+  H_line(x  , y+h, w, c);
+  V_line(x  , y  , h, c);
+  V_line(x+w, y  , h, c);
+}
+
+//***************************************************************************************************************************************
+// Función para dibujar un rectángulo relleno - parámetros ( coordenada x, cordenada y, ancho, alto, color)
+//***************************************************************************************************************************************
+void FillRect(unsigned int x, unsigned int y, unsigned int w, unsigned int h, unsigned int c) {
+  LCD_CMD(0x02c); // write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW); 
+  
+  unsigned int x2, y2;
+  x2 = x+w;
+  y2 = y+h;
+  SetWindows(x, y, x2-1, y2-1);
+  unsigned int k = w*h*2-1;
+  unsigned int i, j;
+  for (int i = 0; i < w; i++) {
+    for (int j = 0; j < h; j++) {
+      LCD_DATA(c >> 8);
+      LCD_DATA(c);
+      
+      //LCD_DATA(bitmap[k]);    
+      k = k - 2;
+     } 
+  }
+  digitalWrite(LCD_CS, HIGH);
+}
+
+//***************************************************************************************************************************************
+// Función para dibujar texto - parámetros ( texto, coordenada x, cordenada y, color, background) 
+//***************************************************************************************************************************************
+void LCD_Print(String text, int x, int y, int fontSize, int color, int background) {
+  int fontXSize ;
+  int fontYSize ;
+  
+  if(fontSize == 1){
+    fontXSize = fontXSizeSmal ;
+    fontYSize = fontYSizeSmal ;
+  }
+  if(fontSize == 2){
+    fontXSize = fontXSizeBig ;
+    fontYSize = fontYSizeBig ;
+  }
+  
+  char charInput ;
+  int cLength = text.length();
+  //Serial.println(cLength,DEC);
+  int charDec ;
+  int c ;
+  int charHex ;
+  char char_array[cLength+1];
+  text.toCharArray(char_array, cLength+1) ;
+  for (int i = 0; i < cLength ; i++) {
+    charInput = char_array[i];
+    //Serial.print(char_array[i]);
+    charDec = int(charInput);
+    digitalWrite(LCD_CS, LOW);
+    SetWindows(x + (i * fontXSize), y, x + (i * fontXSize) + fontXSize - 1, y + fontYSize );
+    long charHex1 ;
+    for ( int n = 0 ; n < fontYSize ; n++ ) {
+      if (fontSize == 1){
+        charHex1 = pgm_read_word_near(smallFont + ((charDec - 32) * fontYSize) + n);
+      }
+      if (fontSize == 2){
+        charHex1 = pgm_read_word_near(bigFont + ((charDec - 32) * fontYSize) + n);
+      }
+      for (int t = 1; t < fontXSize + 1 ; t++) {
+        if (( charHex1 & (1 << (fontXSize - t))) > 0 ) {
+          c = color ;
+        } else {
+          c = background ;
+        }
+        LCD_DATA(c >> 8);
+        LCD_DATA(c);
+      }
+    }
+    digitalWrite(LCD_CS, HIGH);
+  }
+  //Serial.println();
+}
+
+//***************************************************************************************************************************************
+// Función para dibujar una imagen a partir de un arreglo de colores (Bitmap) Formato (Color 16bit R 5bits G 6bits B 5bits)
+//***************************************************************************************************************************************
+void LCD_Bitmap(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char bitmap[]){  
+  LCD_CMD(0x02c); // write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW); 
+  
+  unsigned int x2, y2;
+  x2 = x+width;
+  y2 = y+height;
+  SetWindows(x, y, x2-1, y2-1);
+  unsigned int k = 0;
+  unsigned int i, j;
+
+  for (int i = 0; i < width; i++) {
+    for (int j = 0; j < height; j++) {
+      LCD_DATA(bitmap[k]);
+      LCD_DATA(bitmap[k+1]);
+      //LCD_DATA(bitmap[k]);    
+      k = k + 2;
+     } 
+  }
+  digitalWrite(LCD_CS, HIGH);
+}
+
+//*********************************************************************************************************************************************************
+// Función para dibujar una imagen a partir de un arreglo de colores (Bitmap) obtenido de memoria SD con Formato (Color 16bit R 5bits G 6bits B 5bits)
+//*********************************************************************************************************************************************************
+void LCD_BitmapSD( int x, int y, int width, int height, String TXT){  
+  LCD_CMD(0x02c); // write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW);
+
+  int size_txt = TXT.length();                             // Se obtiene el número de caracteres en el archivo
+  char Nombre_archivo[size_txt + 1];                      // Se crea un array con el tamaño del número de caracteres
+  TXT.toCharArray(Nombre_archivo, size_txt + 1);         // Se almacena cada caracter individual 
+  Archivo = SD.open(Nombre_archivo);                    // Se abre archivo
+
+  //Variables para manejo de datos
+  char NibbleH = 0; 
+  char NibbleL = 0;
+  byte ConversionH = 0;
+  byte ConversionL = 0;
+  int DatosSD[2];
+
+  //Set window
+  unsigned int x2, y2;
+  x2 = x+width;
+  y2 = y+height;
+  SetWindows(x, y, x2-1, y2-1);
+  unsigned int k = 0;
+  unsigned int i, j;
+
+  //Si se encuentra el archivo
+  if (Archivo){
+    for (int j = 0; j < height; j++){ //En el rango de la altura
+      for (int i = 0; i < width; i++){ //En el rango del ancho
+        for (int k = 0; k < 2; k++){ //Se lee hasta dos caracteres por repetición
+          while (Archivo.read() != 'x'); //Mientras haya texto seguir leyendo
+          NibbleH = Archivo.read(); //Primer número del hex (Si es 0x25 se lee 2)
+          NibbleL = Archivo.read(); //Segundo  número del hex (Si es 0x25 se lee 5)
+          
+          //Manipulación de nibbles
+          if (NibbleH > 96) ConversionH = 87; else ConversionH = 48;
+          if (NibbleL > 96) ConversionL = 87; else ConversionL = 48;
+          DatosSD[k] = (NibbleH - ConversionH)*16 + (NibbleL - ConversionL);
+          LCD_DATA(DatosSD[k]); //Se guarda cada dato como bitmap
+        }
+      }
+    } 
+  }
+  
+  Archivo.close(); //Se cierra el archivo (siempre tiene que hacerse)
+  digitalWrite(LCD_CS, HIGH);
+}
+
+//***************************************************************************************************************************************
+// Función para dibujar una imagen sprite - los parámetros columns = número de imagenes en el sprite, index = cual desplegar, flip = darle vuelta
+//***************************************************************************************************************************************
+void LCD_Sprite(int x, int y, int width, int height, unsigned char bitmap[],int columns, int index, char flip, char offset){
+  LCD_CMD(0x02c); // write_memory_start
+  digitalWrite(LCD_RS, HIGH);
+  digitalWrite(LCD_CS, LOW); 
+
+  unsigned int x2, y2;
+  x2 =   x+width;
+  y2=    y+height;
+  SetWindows(x, y, x2-1, y2-1);
+  int k = 0;
+  int ancho = ((width*columns));
+  if(flip){
+  for (int j = 0; j < height; j++){
+      k = (j*(ancho) + index*width -1 - offset)*2;
+      k = k+width*2;
+     for (int i = 0; i < width; i++){
+      LCD_DATA(bitmap[k]);
+      LCD_DATA(bitmap[k+1]);
+      k = k - 2;
+     } 
+  }
+  }else{
+     for (int j = 0; j < height; j++){
+      k = (j*(ancho) + index*width + 1 + offset)*2;
+     for (int i = 0; i < width; i++){
+      LCD_DATA(bitmap[k]);
+      LCD_DATA(bitmap[k+1]);
+      k = k + 2;
+     } 
+  }
+    
+    
+    }
+  digitalWrite(LCD_CS, HIGH);
+}
